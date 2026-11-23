@@ -1,31 +1,14 @@
 
-/* ADJN FastStart — our own implementation (see adjn_faststart.js). */
+
 'use strict';
-/*
- * ADJN FastStart Patch — independent implementation.
- *
- * Technique (understood by diffing a real before/after file pair, not
- * copied from any third-party source):
- *  - Reorders the container to classic "fast start" layout: ftyp, moov,
- *    a small free spacer, then mdat — moov moves BEFORE the media data.
- *  - Rescales the whole movie's timescale (mvhd) to a plain round value
- *    (1000), proportionally rescaling every tkhd/elst entry that's
- *    expressed in that timescale.
- *  - Shifts every existing chunk offset (stco/co64) by a constant delta
- *    to account for the new moov position — no sample table is rewritten,
- *    no track is added or cloned, no sample is inserted anywhere.
- *  - Injects a udta/meta/ilst tag.
- *  - Audio is never touched in any way: same codec, same channel count,
- *    same sample count, same bytes. This also means it has no codec/
- *    channel-layout requirements at all, unlike a padding-based approach.
- */
-const ADJNFastStartEngine = (function () {
+
+const DanzCleanEngine = (function () {
   const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'dinf', 'udta', 'ilst']);
-  const TAG_TEXT = 'HIDZZ Method https://tiktok.com/@hidzz.kyy';
-  // Fixed AAC filler byte template (a generic codec-level filler pattern,
-  // not creative content) used to overwrite the trailing audio samples —
-  // truncated to match each sample's original byte length, so sample
-  // count/sizes/chunk layout never change.
+  const TAG_TEXT = 'Method by DanzClean';
+
+
+
+
   const AUDIO_TAIL_FILLER = Uint8Array.from([
     0xa0, 0x98, 0x00, 0x40, 0x01, 0x28, 0x00, 0x64, 0x00, 0x00, 0x03, 0x50, 0x00, 0x00, 0x38, 0x00
   ]);
@@ -45,7 +28,7 @@ const ADJNFastStartEngine = (function () {
   }
   function box(type, payload) {
     const size = 8 + payload.length;
-    if (size > 0xffffffff) throw new Error('ADJN FastStart: box ' + type + ' too large.');
+    if (size > 0xffffffff) throw new Error('DanzClean: box ' + type + ' too large.');
     const out = new Uint8Array(size);
     wU32(out, 0, size); setType(out, 4, type); out.set(payload, 8);
     return out;
@@ -56,10 +39,10 @@ const ADJNFastStartEngine = (function () {
     const type = typeOf(data, offset + 4);
     let header = 8;
     if (size === 1) {
-      if (offset + 16 > limit) throw new Error('ADJN FastStart: truncated ' + type + '.');
+      if (offset + 16 > limit) throw new Error('DanzClean: truncated ' + type + '.');
       size = u64(data, offset + 8); header = 16;
     } else if (size === 0) size = limit - offset;
-    if (size < header || offset + size > limit) throw new Error('ADJN FastStart: invalid ' + type + ' box.');
+    if (size < header || offset + size > limit) throw new Error('DanzClean: invalid ' + type + ' box.');
     return { type, offset, size, header, end: offset + size };
   }
   function parseTree(data, start, end) {
@@ -86,7 +69,7 @@ const ADJNFastStartEngine = (function () {
     return typeOf(h.raw, p + 8);
   }
 
-  // mdhd/mvhd layout. tkhd is handled separately (see readTkhdDuration below).
+
   function readTimeHeader(leaf) {
     const p = payloadStart(leaf); const v = leaf.raw[p];
     return v === 1
@@ -95,7 +78,7 @@ const ADJNFastStartEngine = (function () {
   }
   function readTkhdDuration(tkhd) {
     const p = payloadStart(tkhd); const v = tkhd.raw[p];
-    const offset = v === 1 ? p + 28 : p + 20; // tkhd duration is always 32-bit, even in v1
+    const offset = v === 1 ? p + 28 : p + 20;
     return { durationOffset: offset, duration: u32(tkhd.raw, offset) };
   }
   function bumpDuration(leaf, newDuration) {
@@ -125,20 +108,20 @@ const ADJNFastStartEngine = (function () {
     if (node.children) for (const c of node.children) zeroTimestamps(c);
   }
 
-  // Zero the 32-byte "compressorname" field of the video sample entry
-  // (avc1/hvc1) — it commonly carries an encoder/device identification
-  // string left over from the original export.
+
+
+
   function zeroCompressorName(outMoov) {
     for (const trak of tracks(outMoov)) {
       if (handlerOf(trak) !== 'vide') continue;
       const stsd = path(trak, ['mdia', 'minf', 'stbl', 'stsd']);
       if (!stsd) continue;
       const p = payloadStart(stsd);
-      const entryStart = p + 8; // version/flags(4) + entry_count(4)
-      // VisualSampleEntry content layout (after the 8-byte entry box header):
-      // reserved(6)+data_ref_index(2)+pre_defined(2)+reserved(2)+pre_defined(12)
-      // +width(2)+height(2)+horizres(4)+vertres(4)+reserved(4)+frame_count(2)
-      // = 42 bytes, then compressorname(32 bytes).
+      const entryStart = p + 8;
+
+
+
+
       const compressorOffset = entryStart + 8 + 42;
       if (compressorOffset + 32 > stsd.raw.byteLength) continue;
       const raw = stsd.raw.slice();
@@ -157,7 +140,7 @@ const ADJNFastStartEngine = (function () {
     {
       const raw = mvhd.raw.slice();
       wU32(raw, mvhdInfo.timescaleOffset, newTimescale);
-      wU32.width = mvhdInfo.width; // no-op, kept for clarity
+      wU32.width = mvhdInfo.width;
       const newDur = Math.round(mvhdInfo.duration * ratio);
       if (mvhdInfo.width === 8) wU64(raw, mvhdInfo.durationOffset, newDur);
       else wU32(raw, mvhdInfo.durationOffset, newDur);
@@ -193,7 +176,7 @@ const ADJNFastStartEngine = (function () {
   function readChunkOffsets(trak) {
     const stbl = path(trak, ['mdia', 'minf', 'stbl']);
     const n = stbl.children.find(c => c.type === 'stco' || c.type === 'co64');
-    if (!n) throw new Error('ADJN FastStart: stco/co64 not found.');
+    if (!n) throw new Error('DanzClean: stco/co64 not found.');
     const is64 = n.type === 'co64'; const p = payloadStart(n); const count = u32(n.raw, p + 4);
     const offs = new Array(count); let o = p + 8;
     for (let i = 0; i < count; i++) { offs[i] = is64 ? u64(n.raw, o) : u32(n.raw, o); o += is64 ? 8 : 4; }
@@ -244,10 +227,10 @@ const ADJNFastStartEngine = (function () {
     return rows;
   }
 
-  // Maps every sample of a track to its [absoluteOffset, size] in the
-  // ORIGINAL file, using that track's own (untouched) stsz/stsc/chunk
-  // offset tables. Needed to locate the trailing audio samples to
-  // overwrite in-place inside mdat.
+
+
+
+
   function getSampleSpans(trak) {
     const sizes = readStsz(trak);
     const stsc = readStsc(trak);
@@ -268,11 +251,11 @@ const ADJNFastStartEngine = (function () {
     return spans;
   }
 
-  // Overwrites the last `count` samples of the audio track in `mediaPayload`
-  // (a mutable copy of mdat's payload, offsets relative to mdat content
-  // start) with the fixed AAC filler pattern, truncated to each sample's
-  // own byte length. Leaves every other byte — including all of the video
-  // track and every earlier audio sample — untouched.
+
+
+
+
+
   function overwriteAudioTail(mediaPayload, audioTrak, mdatContentStart, count) {
     const spans = getSampleSpans(audioTrak);
     const n = Math.min(count, spans.length);
@@ -280,7 +263,7 @@ const ADJNFastStartEngine = (function () {
       const [absOffset, size] = spans[i];
       const relOffset = absOffset - mdatContentStart;
       if (relOffset < 0 || relOffset + size > mediaPayload.length) {
-        throw new Error('ADJN FastStart: audio tail sample out of range.');
+        throw new Error('DanzClean: audio tail sample out of range.');
       }
       for (let b = 0; b < size; b++) {
         mediaPayload[relOffset + b] = b < AUDIO_TAIL_FILLER.length ? AUDIO_TAIL_FILLER[b] : 0;
@@ -311,10 +294,10 @@ const ADJNFastStartEngine = (function () {
     const moovTop = top.find(x => x.type === 'moov');
     const mdats = top.filter(x => x.type === 'mdat');
     if (!ftyp || !moovTop || mdats.length !== 1) {
-      throw new Error('ADJN FastStart: membutuhkan ftyp, moov, dan tepat satu mdat.');
+      throw new Error('DanzClean: membutuhkan ftyp, moov, dan tepat satu mdat.');
     }
     if (top.some(x => ['moof', 'sidx', 'mfra'].includes(x.type))) {
-      throw new Error('ADJN FastStart: fragmented MP4 tidak didukung.');
+      throw new Error('DanzClean: fragmented MP4 tidak didukung.');
     }
     const mdat = mdats[0];
     const mdatContentStart = mdat.offset + mdat.header;
@@ -328,8 +311,8 @@ const ADJNFastStartEngine = (function () {
       overwriteAudioTail(mediaPayload, audioTrakOriginal, mdatContentStart, AUDIO_TAIL_SAMPLE_COUNT);
     }
 
-    // Drop any pre-existing top-level moov/meta (device metadata) so it
-    // doesn't collide with the udta/meta tag injected below.
+
+
     outMoov.children = outMoov.children.filter(c => c.type !== 'meta');
 
     zeroTimestamps(outMoov);
@@ -341,7 +324,7 @@ const ADJNFastStartEngine = (function () {
     const free = box('free', new Uint8Array(0));
     const mdatHeader = makeMdatHeader(mediaPayload.length);
 
-    // Pass 1: placeholder chunk offsets (0) just to measure moov's size.
+
     const originalOffsets = tracks(outMoov).map(t => readChunkOffsets(t));
     tracks(outMoov).forEach((t, i) => setChunkOffsets(t, originalOffsets[i].offsets.map(() => 0), originalOffsets[i].is64));
     const moovPlaceholder = serialize(outMoov);
@@ -349,14 +332,14 @@ const ADJNFastStartEngine = (function () {
     const newMediaStart = ftypBytes.length + moovPlaceholder.length + free.length + mdatHeader.length;
     const shift = newMediaStart - (mdat.offset + mdat.header);
 
-    // Pass 2: apply the real shift to every track's existing chunk offsets.
+
     tracks(outMoov).forEach((t, i) => {
       const shifted = originalOffsets[i].offsets.map(v => v + shift);
       setChunkOffsets(t, shifted, originalOffsets[i].is64 || shifted.some(v => v > 0xffffffff));
     });
     const moovBytes = serialize(outMoov);
     if (moovBytes.length !== moovPlaceholder.length) {
-      throw new Error('ADJN FastStart: ukuran moov berubah setelah finalisasi offset.');
+      throw new Error('DanzClean: ukuran moov berubah setelah finalisasi offset.');
     }
 
     const output = concat([ftypBytes, moovBytes, free, mdatHeader, mediaPayload]);
@@ -364,7 +347,7 @@ const ADJNFastStartEngine = (function () {
     return {
       bytes: output,
       report: {
-        engine: 'ADJN FastStart (Classic-style)',
+        engine: 'DanzClean Engine',
         videoUntouched: true,
         audioTailOverwritten: audioTrakOriginal ? AUDIO_TAIL_SAMPLE_COUNT : 0,
         moovMovedBeforeMdat: true,
@@ -373,9 +356,9 @@ const ADJNFastStartEngine = (function () {
     };
   }
 
-  // Verifies the video track is 100% byte-identical, and the audio track
-  // is byte-identical except for (at most) its last AUDIO_TAIL_SAMPLE_COUNT
-  // samples, which are expected to have been overwritten with filler.
+
+
+
   function verifyUntouched(originalInput, outputInput) {
     const a = originalInput instanceof Uint8Array ? originalInput : new Uint8Array(originalInput);
     const b = outputInput instanceof Uint8Array ? outputInput : new Uint8Array(outputInput);
@@ -431,4 +414,4 @@ const ADJNFastStartEngine = (function () {
   return { patchContainer, verifyUntouched };
 })();
 
-module.exports = { patch: (u8) => ADJNFastStartEngine.patchContainer(u8), engine: ADJNFastStartEngine };
+module.exports = { patch: (u8) => DanzCleanEngine.patchContainer(u8), engine: DanzCleanEngine };
